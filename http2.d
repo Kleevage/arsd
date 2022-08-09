@@ -1,4 +1,4 @@
-// Copyright 2013-2021, Adam D. Ruppe.
+// Copyright 2013-2022, Adam D. Ruppe.
 
 // FIXME: websocket proxy support
 // FIXME: ipv6 support
@@ -840,6 +840,8 @@ struct Uri {
 	/// Browsers use a function like this to figure out links in html.
 	Uri basedOn(in Uri baseUrl) const {
 		Uri n = this; // copies
+		if(n.scheme == "data")
+			return n;
 		// n.uriInvalidated = true; // make sure we regenerate...
 
 		// userinfo is not inherited... is this wrong?
@@ -1137,6 +1139,50 @@ class HttpRequest {
 				responseData = (*res).deepCopy();
 				return;
 			}
+		}
+
+		if(this.where.scheme == "data") {
+			void error(string content) {
+				responseData.code = 400;
+				responseData.codeText = "Bad Request";
+				responseData.contentType = "text/plain";
+				responseData.content = cast(ubyte[]) content;
+				responseData.contentText = content;
+				state = State.complete;
+				return;
+			}
+
+			auto thing = this.where.path;
+			// format is: type,data
+			// type can have ;base64
+			auto comma = thing.indexOf(",");
+			if(comma == -1)
+				return error("Invalid data uri, no comma found");
+
+			auto type = thing[0 .. comma];
+			auto data = thing[comma + 1 .. $];
+			if(type.length == 0)
+				type = "text/plain";
+
+			import std.uri;
+			auto bdata = cast(ubyte[]) decodeComponent(data);
+
+			if(type.indexOf(";base64") != -1) {
+				import std.base64;
+				try {
+					bdata = Base64.decode(bdata);
+				} catch(Exception e) {
+					return error(e.msg);
+				}
+			}
+
+			responseData.code = 200;
+			responseData.codeText = "OK";
+			responseData.contentType = type;
+			responseData.content = bdata;
+			responseData.contentText = cast(string) responseData.content;
+			state = State.complete;
+			return;
 		}
 
 		string headers;
@@ -1872,41 +1918,32 @@ class HttpRequest {
 					auto header = responseData.headers[$-1];
 
 					auto colon = header.indexOf(":");
-					if(colon == -1)
+					if(colon < 0 || colon >= header.length)
 						return;
-					auto name = header[0 .. colon];
-					if(colon + 1 == header.length || colon + 2 == header.length) // assuming a space there
-						return; // empty header, idk
-					assert(colon + 2 < header.length, header);
-					auto value = header[colon + 2 .. $]; // skipping the colon itself and the following space
+					auto name = toLower(header[0 .. colon]);
+					auto value = header[colon + 1 .. $].strip; // skip colon and strip whitespace
 
 					switch(name) {
-						case "Connection":
 						case "connection":
 							if(value == "close")
 								closeSocketWhenComplete = true;
 						break;
-						case "Content-Type":
 						case "content-type":
 							responseData.contentType = value;
 						break;
-						case "Location":
 						case "location":
 							responseData.location = value;
 						break;
-						case "Content-Length":
 						case "content-length":
-							bodyReadingState.contentLengthRemaining = to!int(value.strip);
+							bodyReadingState.contentLengthRemaining = to!int(value);
 						break;
-						case "Transfer-Encoding":
 						case "transfer-encoding":
 							// note that if it is gzipped, it zips first, then chunks the compressed stream.
 							// so we should always dechunk first, then feed into the decompressor
-							if(value.strip == "chunked")
+							if(value == "chunked")
 								bodyReadingState.isChunked = true;
 							else throw new Exception("Unknown Transfer-Encoding: " ~ value);
 						break;
-						case "Content-Encoding":
 						case "content-encoding":
 							if(value == "gzip") {
 								bodyReadingState.isGzipped = true;
@@ -1916,7 +1953,6 @@ class HttpRequest {
 								uncompress = new UnCompress();
 							} else throw new Exception("Unknown Content-Encoding: " ~ value);
 						break;
-						case "Set-Cookie":
 						case "set-cookie":
 							// handled elsewhere fyi
 						break;
@@ -5345,6 +5381,21 @@ version(Windows) {
 		return cast(void**) table.ptr;
 	}
 	}
+}
+
+unittest {
+	auto client = new HttpClient();
+	auto response = client.navigateTo(Uri("data:,Hello%2C%20World%21")).waitForCompletion();
+	assert(response.contentTypeMimeType == "text/plain", response.contentType);
+	assert(response.contentText == "Hello, World!", response.contentText);
+
+	response = client.navigateTo(Uri("data:text/plain;base64,SGVsbG8sIFdvcmxkIQ==")).waitForCompletion();
+	assert(response.contentTypeMimeType == "text/plain", response.contentType);
+	assert(response.contentText == "Hello, World!", response.contentText);
+
+	response = client.navigateTo(Uri("data:text/html,%3Ch1%3EHello%2C%20World%21%3C%2Fh1%3E")).waitForCompletion();
+	assert(response.contentTypeMimeType == "text/html", response.contentType);
+	assert(response.contentText == "<h1>Hello, World!</h1>", response.contentText);
 }
 
 version(arsd_http2_unittests)

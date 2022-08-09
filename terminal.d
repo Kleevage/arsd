@@ -1009,6 +1009,58 @@ struct Terminal {
 		else return (tcaps & TerminalCapabilities.arsdClipboard) ? true : false;
 	}
 
+	version (Win32Console)
+		// Mimic sc & rc termcaps on Windows
+		COORD[] cursorPositionStack;
+
+	/++
+		Saves/restores cursor position to a stack.
+
+		History:
+			Added August 6, 2022 (dub v10.9)
+	+/
+	bool saveCursorPosition()
+	{
+		version (Win32Console)
+		{
+			flush();
+			CONSOLE_SCREEN_BUFFER_INFO info;
+			if (GetConsoleScreenBufferInfo(hConsole, &info))
+			{
+				cursorPositionStack ~= info.dwCursorPosition; // push
+				return true;
+			}
+			else
+			{
+				return false;
+			}
+		}
+		else
+			return doTermcap("sc");
+	}
+
+	/// ditto
+	bool restoreCursorPosition()
+	{
+		version (Win32Console)
+		{
+			if (cursorPositionStack.length > 0)
+			{
+				auto p = cursorPositionStack[$ - 1];
+				moveTo(p.X, p.Y);
+				cursorPositionStack = cursorPositionStack[0 .. $ - 1]; // pop
+				return true;
+			}
+			else
+				return false;
+		}
+		else
+		{
+			// FIXME: needs to update cursorX and cursorY
+			return doTermcap("rc");
+		}
+	}
+
 	// only supported on my custom terminal emulator. guarded behind if(inlineImagesSupported)
 	// though that isn't even 100% accurate but meh
 	void changeWindowIcon()(string filename) {
